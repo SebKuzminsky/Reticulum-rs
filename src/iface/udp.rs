@@ -1,4 +1,5 @@
 use std::os::fd::AsRawFd;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
@@ -41,24 +42,43 @@ impl UdpInterface {
                 break;
             }
 
-            let socket = match nix::sys::socket::socket(
+            let Ok(socket) = nix::sys::socket::socket(
                 nix::sys::socket::AddressFamily::Inet,
                 nix::sys::socket::SockType::Datagram,
                 nix::sys::socket::SockFlag::empty(),
                 nix::sys::socket::SockProtocol::Udp,
-            ) {
-                Ok(socket) => socket,
-                Err(e) => {
-                    log::info!("udp_interface: couldn't create udp socket: {e:?}");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
+            ) else {
+                log::info!("udp_interface: couldn't create udp socket");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
             };
 
-            nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::ReuseAddr, &true)
-                .unwrap();
+            if let Err(e) =
+                nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::ReuseAddr, &true)
+            {
+                log::info!("udp_interface: couldn't setsockopt ReuseAddr on the udp socket: {e:?}");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
 
-            let bind_sockaddr = nix::sys::socket::SockaddrIn::new(239, 0, 0, 69, 4242);
+            // Bind the socket to the specified IP (v4 only for now)
+            // and port.
+            //
+            // FIXME: This seems way more awkward than it should be,
+            // but std::net::UdpSocket and tokio::net::UdpSocket both
+            // don't have a constructor other than `bind()`, and for
+            // this application we have to set the sockopt ReuseAddr
+            // before we can bind, so that multiple Reticulum processes
+            // can use the same multicast port.
+            let bind_socketaddr = std::net::SocketAddrV4::from_str(bind_addr.as_str()).unwrap();
+            let bind_octets = bind_socketaddr.ip().octets();
+            let bind_sockaddr = nix::sys::socket::SockaddrIn::new(
+                bind_octets[0],
+                bind_octets[1],
+                bind_octets[2],
+                bind_octets[3],
+                bind_socketaddr.port(),
+            );
             nix::sys::socket::bind(socket.as_raw_fd(), &bind_sockaddr).unwrap();
 
             let socket: std::net::UdpSocket = socket.into();
@@ -98,7 +118,15 @@ impl UdpInterface {
             let read_socket = Arc::new(socket);
             let write_socket = read_socket.clone();
 
-            log::info!("udp_interface bound to <{}>", bind_addr);
+            if let Some(forward_addr) = &forward_addr {
+                log::info!(
+                    "udp_interface bound to <{}>, forwarding to <{}>",
+                    bind_addr,
+                    forward_addr
+                );
+            } else {
+                log::info!("udp_interface bound to <{}> (no forwarding)", bind_addr);
+            }
 
             const BUFFER_SIZE: usize = core::mem::size_of::<Packet>() * 3;
 
