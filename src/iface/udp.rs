@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
@@ -28,8 +29,19 @@ impl UdpInterface {
     }
 
     pub async fn spawn(context: InterfaceContext<Self>) {
-        let bind_addr = { context.inner.lock().unwrap().bind_addr.clone() };
-        let forward_addr = { context.inner.lock().unwrap().forward_addr.clone() };
+        // FIXME: Convert UdpInterface fields from String to their actual
+        // data types (SocketAddr). This should have happened in new(),
+        // which should return Err on parse failure, rather than us
+        // unwrapping errors here.
+        let bind_addr =
+            std::net::SocketAddr::from_str(&context.inner.lock().unwrap().bind_addr).unwrap();
+        let forward_addr = context
+            .inner
+            .lock()
+            .unwrap()
+            .forward_addr
+            .as_ref()
+            .map(|s| std::net::SocketAddr::from_str(s).unwrap());
         let iface_address = context.channel.address;
 
         let (rx_channel, tx_channel) = context.channel.split();
