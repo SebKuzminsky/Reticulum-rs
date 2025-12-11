@@ -28,6 +28,36 @@ impl UdpInterface {
         }
     }
 
+    fn make_udp_socket(
+        bind_addr: &std::net::SocketAddr,
+        forward_addr: &Option<std::net::SocketAddr>,
+    ) -> Result<tokio::net::UdpSocket, std::io::Error> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(*bind_addr),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        socket.set_nonblocking(true)?;
+
+        if let Some(forward_addr) = &forward_addr {
+            if forward_addr.ip().is_multicast() {
+                socket.set_reuse_address(true)?;
+                match forward_addr.ip() {
+                    std::net::IpAddr::V4(forward_addr_v4) => socket
+                        .join_multicast_v4(&forward_addr_v4, &std::net::Ipv4Addr::UNSPECIFIED)?,
+                    std::net::IpAddr::V6(forward_addr_v6) => {
+                        socket.join_multicast_v6(&forward_addr_v6, 0)?
+                    }
+                };
+                log::info!("joined multicast channel {:?}", forward_addr.ip());
+            }
+        }
+
+        socket.bind(&socket2::SockAddr::from(*bind_addr))?;
+
+        tokio::net::UdpSocket::from_std(socket.into())
+    }
+
     pub async fn spawn(context: InterfaceContext<Self>) {
         // FIXME: Convert UdpInterface fields from String to their actual
         // data types (SocketAddr). This should have happened in new(),
@@ -52,24 +82,22 @@ impl UdpInterface {
                 break;
             }
 
-            let socket = UdpSocket::bind(&bind_addr)
-                .await
-                .map_err(|_| RnsError::ConnectionError);
+            let socket = match UdpInterface::make_udp_socket(&bind_addr, &forward_addr) {
+                Ok(socket) => socket,
+                Err(e) => {
+                    log::info!("udp_interface: couldn't create UDP socket (bind_addr={bind_addr:?}, forward_addr={forward_addr:?}): {:?}", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
-            if socket.is_err() {
-                log::info!("udp_interface: couldn't bind to <{}>", bind_addr);
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            }
+            log::info!("udp_interface bound to <{}>", bind_addr);
 
             let cancel = context.cancel.clone();
             let stop = CancellationToken::new();
 
-            let socket = socket.unwrap();
             let read_socket = Arc::new(socket);
             let write_socket = read_socket.clone();
-
-            log::info!("udp_interface bound to <{}>", bind_addr);
 
             const BUFFER_SIZE: usize = core::mem::size_of::<Packet>() * 3;
 
